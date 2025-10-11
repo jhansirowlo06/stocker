@@ -1,769 +1,595 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session
-import boto3
-import os
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g
 import uuid
-from datetime import datetime
-from boto3.dynamodb.conditions import Key, Attr
-from decimal import Decimal
-import json
+import hashlib
+import time
 
 app = Flask(__name__)
-app.secret_key = "stocker_secret_2024"
+app.secret_key = 'super_secret_key_for_stocker' # Used for session management
 
-# AWS Configuration
-# For local development - use environment variables
-# For EC2 deployment with IAM role - remove credentials and just use region
-AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY_ID')
-AWS_SECRET_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
-AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+# --- Mock Database Structures (In-memory for simplicity) ---
 
-# Set up boto3 session
-if AWS_ACCESS_KEY and AWS_SECRET_KEY:
-    # Local development with explicit credentials
-    boto3_session = boto3.Session(
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION
-    )
-else:
-    # EC2 instance with IAM role
-    boto3_session = boto3.Session(region_name=AWS_REGION)
+# Hash a password
+def hash_password(password):
+    """Hashes a password using SHA256."""
+    return hashlib.sha256(password.encode()).hexdigest()
 
-# Create DynamoDB resource
-dynamodb = boto3_session.resource('dynamodb')
-
-# Define table names
-USER_TABLE = 'stocker_users'
-STOCK_TABLE = 'stocker_stocks'
-TRANSACTION_TABLE = 'stocker_transactions'
-PORTFOLIO_TABLE = 'stocker_portfolio'
-
-# Helper class for DynamoDB item serialization
-class DecimalEncoder(json.JSONEncoder):
-    def default(self, o):
-        if isinstance(o, Decimal):
-            return float(o)
-        return super(DecimalEncoder, self).default(o)
-
-# Helper function to convert DynamoDB response to Python dict
-def clean_dynamo_response(response):
-    if not response:
-        return None
-    return json.loads(json.dumps(response, cls=DecimalEncoder))
-
-# Create SNS client
-if AWS_ACCESS_KEY and AWS_SECRET_KEY:
-    sns = boto3_session.client('sns')
-else:
-    sns = boto3.client('sns', region_name=AWS_REGION)
-
-# SNS Topic ARNs
-USER_ACCOUNT_TOPIC_ARN = "arn:aws:sns:us-east-1:604665149129:StockerUserAccountTopic"
-TRANSACTION_TOPIC_ARN = "arn:aws:sns:us-east-1:604665149129:StockerTransactionTopic"
-
-def send_notification(topic_arn, subject, message, attributes=None):
-    """Send an SNS notification"""
-    if not topic_arn:
-        print(f"Warning: Missing SNS topic ARN for notification: {subject}")
-        return False
-
-    try:
-        kwargs = {
-            'TopicArn': topic_arn,
-            'Subject': subject,
-            'Message': message
-        }
-
-        if attributes:
-            kwargs['MessageAttributes'] = attributes
-        response = sns.publish(**kwargs)
-        return True
-    except Exception as e:
-        print(f"SNS notification failed: {str(e)}")
-        return False
-# ------------------- Data Access Functions ------------------- #
-def get_user_by_email(email):
-    """Get user by email"""
-    table = dynamodb.Table(USER_TABLE)
-    response = table.get_item(Key={'email': email})
-    return response.get('Item')
-
-def create_user(username, email, password, role):
-    """Create a new user"""
-    table = dynamodb.Table(USER_TABLE)
-    user = {
-        'id': str(uuid.uuid4()),
-        'username': username,
-        'email': email,
-        'password': password,
-        'role': role
+# Mock Users: id, username, email, password, role, cash_balance
+USERS = {
+    # Default Admin
+    'admin_1': {
+        'id': 'admin_1',
+        'username': 'AdminUser',
+        'email': 'admin@stocker.com',
+        'password': hash_password('adminpass'),
+        'role': 'Admin',
+        'cash_balance': 0.00
+    },
+    # Default Trader
+    'trader_1': {
+        'id': 'trader_1',
+        'username': 'TraderVinay',
+        'email': 'vinay@trader.com',
+        'password': hash_password('traderpass'),
+        'role': 'Trader',
+        'cash_balance': 10000.00 # This will be updated by mock transactions below
+    },
+    # Another mock trader for diverse transactions
+    'trader_2': {
+        'id': 'trader_2',
+        'username': 'JaneDoe',
+        'email': 'jane@trader.com',
+        'password': hash_password('janepass'),
+        'role': 'Trader',
+        'cash_balance': 10000.00 # This will be updated by mock transactions below
     }
-    table.put_item(Item=user)
-    return user
+}
 
-def get_all_stocks():
-    """Get all stocks"""
-    table = dynamodb.Table(STOCK_TABLE)
-    response = table.scan()
-    return response.get('Items', [])
+# Mock Stocks (Simulated Market Data)
+STOCKS = {
+    'GOOGL': {'symbol': 'GOOGL', 'name': 'Alphabet Inc.', 'price': 1500.00, 'industry': 'Tech'},
+    'TSLA': {'symbol': 'TSLA', 'name': 'Tesla, Inc.', 'price': 650.00, 'industry': 'Automotive'},
+    'MSFT': {'symbol': 'MSFT', 'name': 'Microsoft Corp', 'price': 300.00, 'industry': 'Tech'},
+    'JPM': {'symbol': 'JPM', 'name': 'JP Morgan Chase', 'price': 150.00, 'industry': 'Finance'},
+    'XOM': {'symbol': 'XOM', 'name': 'Exxon Mobil Corp', 'price': 110.00, 'industry': 'Energy'},
+}
 
-def get_stock_by_id(stock_id):
-    """Get stock by ID"""
-    table = dynamodb.Table(STOCK_TABLE)
-    response = table.get_item(Key={'id': stock_id})
-    return response.get('Item')
+# Mock Portfolio: {user_id: {symbol: {'quantity': N, 'avg_buy_price': P}}}
+PORTFOLIOS = {} 
 
-def get_traders():
-    """Get all traders"""
-    table = dynamodb.Table(USER_TABLE)
-    response = table.scan(
-        FilterExpression=Attr('role').eq('trader')
-    )
-    return response.get('Items', [])
 
-def delete_trader_by_id(trader_id):
-    """Delete a trader by ID"""
-    # First, get the user's email
-    user = get_user_by_id(trader_id)
-    if not user:
-        print(f"User with ID {trader_id} not found")
-        return False
-
-    email = user.get('email')
-    if not email:
-        print(f"User with ID {trader_id} has no email")
-        return False
-
-    # 1. Delete the user
-    user_table = dynamodb.Table(USER_TABLE)
-    user_table.delete_item(Key={'email': trader_id})
-    for item in portfolio_response.get('Items', []):
-        portfolio_table.delete_item(
-            Key={
-                'user_id': trader_id,
-                'stock_id': item['stock_id']
-            }
-        )
-    # 2. Delete all portfolio items for the user
-    portfolio_table = dynamodb.Table(PORTFOLIO_TABLE)
-    portfolio_response = portfolio_table.query(
-        KeyConditionExpression=Key('user_id').eq(trader_id)
-    )
-
-    # 3. We might want to keep transactions for audit purposes
-    return True
-
-def get_transactions():
-    """Get all transactions with user and stock details"""
-    table = dynamodb.Table(TRANSACTION_TABLE)
-    transactions = table.scan().get('Items', [])
-
-    # Get user and stock details for each transaction
-    for transaction in transactions:
-        user = get_user_by_id(transaction['user_id'])
-        stock = get_stock_by_id(transaction['stock_id'])
-
-        if user:
-            transaction['user'] = user
-
-        if stock:
-            transaction['stock'] = stock
-
-    return transactions
-
-def get_user_by_id(user_id):
-    """Get user by ID"""
-    table = dynamodb.Table(USER_TABLE)
-    response = table.scan(
-        FilterExpression=Attr('id').eq(user_id)
-    )
-    items = response.get('Items', [])
-    return items[0] if items else None
-
-def get_portfolios():
-    """Get all portfolios with user and stock details"""
-    table = dynamodb.Table(PORTFOLIO_TABLE)
-    portfolios = table.scan().get('Items', [])
-
-    # Get user and stock details for each portfolio item
-    for portfolio in portfolios:
-        user = get_user_by_id(portfolio['user_id'])
-        stock = get_stock_by_id(portfolio['stock_id'])
-
-        if user:
-            portfolio['user'] = user
-
-        if stock:
-            portfolio['stock'] = stock
-
-    return portfolios
-
-def get_user_portfolio(user_id):
-    """Get portfolio for a specific user"""
-    table = dynamodb.Table(PORTFOLIO_TABLE)
-    response = table.query(
-        KeyConditionExpression=Key('user_id').eq(user_id)
-    )
-
-    portfolio_items = response.get('Items', [])
-
-    # Get stock details for each portfolio item
-    for item in portfolio_items:
-        stock = get_stock_by_id(item['stock_id'])
-        if stock:
-            item['stock'] = stock
-
-    return portfolio_items
-
-def get_user_transactions(user_id):
-    """Get transactions for a specific user"""
-    table = dynamodb.Table(TRANSACTION_TABLE)
-    response = table.scan(
-        FilterExpression=Attr('user_id').eq(user_id)
-    )
-
-    transactions = response.get('Items', [])
-
-    # Get stock details for each transaction
-    for transaction in transactions:
-        stock = get_stock_by_id(transaction['stock_id'])
-        if stock:
-            transaction['stock'] = stock
-
-    # Sort by transaction_date in descending order
-    transactions.sort(key=lambda x: x.get('transaction_date', ''), reverse=True)
-
-    return transactions
-
-def get_portfolio_item(user_id, stock_id):
-    """Get a specific portfolio item"""
-    table = dynamodb.Table(PORTFOLIO_TABLE)
-    response = table.get_item(
-        Key={
-            'user_id': user_id,
-            'stock_id': stock_id
-        }
-    )
-    return response.get('Item')
-
-def create_transaction(user_id, stock_id, action, quantity, price, status='completed'):
-    """Create a new transaction"""
-    table = dynamodb.Table(TRANSACTION_TABLE)
-    transaction_id = str(uuid.uuid4())
-
-    transaction = {
-        'id': transaction_id,
-        'user_id': user_id,
-        'stock_id': stock_id,
-        'action': action,
-        'quantity': quantity,
-        'price': Decimal(str(price)),
-        'status': status,
-        'transaction_date': datetime.now().isoformat()
+# Mock Transactions: Stores records of all buys and sells
+TRANSACTIONS = [
+    {
+        'id': 't0001',
+        'user_id': 'trader_1',
+        'username': 'TraderVinay',
+        'action': 'BUY',
+        'stock': 'MSFT',
+        'quantity': 10,
+        'price': 250.00,
+        'total': 2500.00,
+        'status': 'Completed',
+        'date': '2023-10-01 10:15:00'
+    },
+    {
+        'id': 't0002',
+        'user_id': 'trader_1',
+        'username': 'TraderVinay',
+        'action': 'BUY',
+        'stock': 'JPM',
+        'quantity': 50,
+        'price': 140.00,
+        'total': 7000.00,
+        'status': 'Completed',
+        'date': '2023-10-01 10:30:00'
+    },
+    {
+        'id': 't0003',
+        'user_id': 'trader_2',
+        'username': 'JaneDoe',
+        'action': 'BUY',
+        'stock': 'GOOGL',
+        'quantity': 2,
+        'price': 1450.00,
+        'total': 2900.00,
+        'status': 'Completed',
+        'date': '2023-10-02 11:00:00'
+    },
+    {
+        'id': 't0004',
+        'user_id': 'trader_1',
+        'username': 'TraderVinay',
+        'action': 'SELL',
+        'stock': 'JPM',
+        'quantity': 10,
+        'price': 155.00,
+        'total': 1550.00,
+        'status': 'Completed',
+        'date': '2023-10-03 14:45:00'
+    },
+    {
+        'id': 't0005',
+        'user_id': 'trader_2',
+        'username': 'JaneDoe',
+        'action': 'BUY',
+        'stock': 'TSLA',
+        'quantity': 5,
+        'price': 600.00,
+        'total': 3000.00,
+        'status': 'Completed',
+        'date': '2023-10-04 09:20:00'
     }
+]
 
-    table.put_item(Item=transaction)
-    return transaction
+# --- Initialization of Portfolios and Cash Balances based on mock transactions ---
 
-def update_portfolio(user_id, stock_id, quantity, average_price):
-    """Update or create a portfolio item"""
-    table = dynamodb.Table(PORTFOLIO_TABLE)
+def initialize_mock_data():
+    """Initializes portfolios and updates cash balances based on mock transactions."""
+    
+    # Reset cash for traders to ensure accurate calculation
+    USERS['trader_1']['cash_balance'] = 10000.00
+    USERS['trader_2']['cash_balance'] = 10000.00
+    PORTFOLIOS.clear()
 
-    # Ensure quantity and average_price are Decimal objects
-    if not isinstance(quantity, Decimal):
-        quantity = Decimal(str(quantity))
+    for t in TRANSACTIONS:
+        user_id = t['user_id']
+        quantity = t['quantity']
+        total = t['total']
+        symbol = t['stock']
+        
+        # Update Cash Balance
+        if t['action'] == 'BUY':
+            USERS[user_id]['cash_balance'] -= total
+        elif t['action'] == 'SELL':
+            USERS[user_id]['cash_balance'] += total
+            
+        # Update Portfolio Holdings
+        PORTFOLIOS.setdefault(user_id, {})
+        holdings = PORTFOLIOS[user_id].setdefault(symbol, {'quantity': 0, 'avg_buy_price': 0.0})
+        
+        if t['action'] == 'BUY':
+            # Calculate new average buy price
+            old_total_cost = holdings['quantity'] * holdings['avg_buy_price']
+            new_total_cost = old_total_cost + total
+            new_total_quantity = holdings['quantity'] + quantity
+            
+            holdings['avg_buy_price'] = new_total_cost / new_total_quantity
+            holdings['quantity'] = new_total_quantity
+            
+        elif t['action'] == 'SELL':
+            # Selling reduces quantity (assuming sales are FIFO/LIFO, but we only track avg_buy_price)
+            holdings['quantity'] -= quantity
+            
+            if holdings['quantity'] <= 0:
+                del PORTFOLIOS[user_id][symbol]
+                if not PORTFOLIOS[user_id]:
+                    del PORTFOLIOS[user_id]
+                    
+initialize_mock_data() # Run the initialization function
 
-    if not isinstance(average_price, Decimal):
-        average_price = Decimal(str(average_price))
+# --- Helper Functions and Decorators ---
 
-    # Check if portfolio item exists
-    existing = get_portfolio_item(user_id, stock_id)
+def get_user(user_id):
+    """Retrieves user by ID."""
+    return USERS.get(user_id)
 
-    if existing and quantity > 0:
-        # Update existing portfolio item
-        table.update_item(
-            Key={
-                'user_id': user_id,
-                'stock_id': stock_id
-            },
-            UpdateExpression="set quantity=:q, average_price=:p",
-            ExpressionAttributeValues={
-                ':q': quantity,
-                ':p': Decimal(str(average_price))
-            }
-        )
-    elif existing and quantity <= 0:
-        # Delete portfolio item if quantity is zero or negative
-        table.delete_item(
-            Key={
-                'user_id': user_id,
-                'stock_id': stock_id
-            }
-        )
-    elif quantity > 0:
-        # Create new portfolio item
-        portfolio_item = {
-            'user_id': user_id,
-            'stock_id': stock_id,
-            'quantity': quantity,
-            'average_price': Decimal(str(average_price))
-        }
-        table.put_item(Item=portfolio_item)
-# ------------------- Routes ------------------- #
+@app.before_request
+def load_logged_in_user():
+    """Loads the user object into Flask's global context (g) before every request."""
+    user_id = session.get('user_id')
+
+    if user_id is None:
+        g.user = None
+    else:
+        g.user = get_user(user_id)
+        # Add a check for user existence just in case the mock DB was reset
+        if g.user is None:
+             session.pop('user_id', None)
+
+
+def login_required(role=None):
+    """Decorator to enforce login and optional role."""
+    def wrapper(func):
+        def decorated_view(*args, **kwargs):
+            if 'user_id' not in session or g.user is None:
+                flash("Please log in to access this page.", 'error')
+                return redirect(url_for('login'))
+            user = g.user
+            if role and user['role'] != role:
+                flash(f"Access denied. You must be a {role}.", 'error')
+                # Redirect based on role if logged in but unauthorized
+                return redirect(url_for('admin_dashboard') if user['role'] == 'Admin' else url_for('trader_dashboard'))
+            return func(*args, **kwargs)
+        decorated_view.__name__ = func.__name__ # Needed for flask routing
+        return decorated_view
+    return wrapper
+    
+def calculate_portfolio_value(user_id):
+    """Calculates the total market value of a user's portfolio."""
+    total_value = 0.0
+    if user_id in PORTFOLIOS:
+        for symbol, holding in PORTFOLIOS[user_id].items():
+            current_price = STOCKS.get(symbol, {'price': 0.0})['price']
+            total_value += holding['quantity'] * current_price
+    return total_value
+
+# --- Routes ---
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    """Landing Page (Home)"""
+    return render_template('index.html', title="Welcome to STOCKER")
+
+@app.route('/about')
+def about_us():
+    """About Us Page"""
+    return render_template('about.html', title="About Us")
+
+@app.route('/services')
+def services():
+    """Our Services Page"""
+    return render_template('services.html', title="Our Services")
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    """User Registration Route"""
+    if request.method == 'POST':
+        email = request.form['email'].strip()
+        username = request.form['username'].strip()
+        password = request.form['password']
+        role = request.form['role']
+        
+        # Simple validation
+        if not all([email, username, password, role]):
+            flash('All fields are required.', 'error')
+            return redirect(url_for('register'))
+        
+        # Check if user already exists
+        if any(u['email'] == email for u in USERS.values()):
+            flash('Account with this email already exists.', 'error')
+            return redirect(url_for('register'))
+
+        user_id = str(uuid.uuid4())
+        
+        USERS[user_id] = {
+            'id': user_id,
+            'username': username,
+            'email': email,
+            'password': hash_password(password),
+            'role': role,
+            'cash_balance': 10000.00 if role == 'Trader' else 0.00
+        }
+        flash('Registration successful! Please log in.', 'success')
+        return redirect(url_for('login'))
+        
+    return render_template('register.html', title="Create Account")
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    """User Login Route"""
     if request.method == 'POST':
-        role = request.form.get('role')
-        email = request.form.get('email')
-        password = request.form.get('password')
-
-        user = get_user_by_email(email)
-        print(f"Trying to login with: {email} ({role})")
-
-        if user and user['password'] == password and user['role'] == role:
-            print("Login successful!")
-            session['email'] = user['email']
-            session['role'] = user['role']
-            session['user_id'] = user['id']
-
-            # Send login notification
-            send_notification(
-                USER_ACCOUNT_TOPIC_ARN,
-                'User Login',
-                f"User logged in: {user['username']} ({email}) as {role}",
-                {
-                    'event_type': {
-                        'DataType': 'String',
-                        'StringValue': 'LOGIN'
-                    },
-                    'user_role': {
-                        'DataType': 'String',
-                        'StringValue': role
-                    }
-                }
-            )
-
-            flash('Login successful!', 'success')
-            return redirect(url_for('dashboard_admin' if role == 'admin' else 'dashboard_trader'))
-        else:
-            print("Login failed.")
-            flash('Invalid credentials or role mismatch.', 'danger')
-            return redirect(url_for('login'))
-
-    return render_template('login.html')
-
-@app.route('/signup', methods=['GET', 'POST'])
-def signup():
-    if request.method == 'POST':
-        username = request.form['username']
-        email = request.form['email']
+        email = request.form['email'].strip()
         password = request.form['password']
         role = request.form['role']
-
-        existing_user = get_user_by_email(email)
-        if existing_user:
-            flash('User already exists. Please login.', 'warning')
+        
+        hashed_password = hash_password(password)
+        
+        # Find user and verify credentials
+        user_found = next((user for user in USERS.values() 
+                           if user['email'] == email and 
+                              user['password'] == hashed_password and 
+                              user['role'] == role), None)
+        
+        if user_found:
+            session['user_id'] = user_found['id']
+            # g.user is set via @app.before_request on the next request
+            flash('Login successful!', 'success')
+            if role == 'Admin':
+                return redirect(url_for('admin_dashboard'))
+            else:
+                return redirect(url_for('trader_dashboard'))
+        else:
+            flash('Invalid credentials or role selected.', 'error')
             return redirect(url_for('login'))
 
-        new_user = create_user(username, email, password, role)
-
-        # Send account creation notification
-        send_notification(
-            USER_ACCOUNT_TOPIC_ARN,
-            'New User Registration',
-            f"New user registered: {username} ({email}) as {role}",
-            {
-                'event_type': {
-                    'DataType': 'String',
-                    'StringValue': 'ACCOUNT_CREATION'
-                },
-                'user_role': {
-                    'DataType': 'String',
-                    'StringValue': role
-                }
-            }
-        )
-
-        flash(f"Account created for {username}", 'success')
-        return redirect(url_for('login'))
-
-    return render_template('signup.html')
-
-@app.route('/dashboard_admin')
-def dashboard_admin():
-    if 'email' not in session or session.get('role') != 'admin':
-        flash("Access denied. Admins only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session['email'])
-    stocks = get_all_stocks()
-    return render_template('dashboard_admin.html', user=user, market_data=stocks)
-
-@app.route('/dashboard_trader')
-def dashboard_trader():
-    if 'email' not in session or session.get('role') != 'trader':
-        flash("Access denied. Traders only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))
-    stocks = get_all_stocks()
-    return render_template('dashboard_trader.html', user=user, market_data=stocks)
-
-@app.route('/service01')
-def service01():
-    if 'email' not in session or session.get('role') != 'admin':
-        flash("Access denied. Admins only.", "danger")
-        return redirect(url_for('login'))      
-
-    user = get_user_by_email(session.get('email'))
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login')) 
-
-    traders = get_traders()
-
-    # Calculate portfolio values for each trader
-    for trader in traders:
-        trader_portfolio = get_user_portfolio(trader['id'])
-        portfolio_value = 0
-        for item in trader_portfolio:
-            portfolio_value += float(item['quantity']) * float(item['stock']['price'])
-        # Add this as an attribute to the trader object
-        trader['total_portfolio_value'] = portfolio_value
-
-    return render_template('service-details-1.html', traders=traders)   
-
-@app.route('/delete_trader/<string:trader_id>', methods=['POST'])
-def delete_trader(trader_id): 
-    if 'email' not in session or session.get('role') != 'admin':
-        flash("Access denied. Admins only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))
-
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))
-
-    success = delete_trader_by_id(trader_id)
-    if success:
-        flash("Trader deleted successfully.", "success")
-    else:
-        flash("Failed to delete trader.", "danger")
-
-    return redirect(url_for('service01'))
-
-@app.route('/service02')
-def service02():
-    if 'email' not in session or session.get('role') != 'admin':
-        flash("Access denied. Admins only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))   
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))
-
-    transactions = get_transactions()
-    for transaction in transactions:
-        if 'transaction_date' in transaction and transaction['transaction_date']:
-            try:
-                # Convert ISO string to datetime object
-                transaction['transaction_date'] = datetime.fromisoformat(transaction['transaction_date'])
-            except (ValueError, TypeError):
-                # If conversion fails, set to None
-                transaction['transaction_date'] = None
-
-    return render_template('service-details-2.html', transactions=transactions)
-
-@app.route('/service03')
-def service03():
-    if 'email' not in session or session.get('role') != 'admin':
-        flash("Access denied. Admins only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))   
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))    
-
-    portfolios = get_portfolios()
-
-    # Calculate total portfolio value
-    total_portfolio_value = 0
-    for portfolio in portfolios:
-        if 'stock' in portfolio:
-            total_portfolio_value += float(portfolio['quantity']) * float(portfolio['stock']['price'])
-
-    return render_template('service-details-3.html', 
-                          portfolios=portfolios, 
-                          total_portfolio_value=total_portfolio_value)
-
-@app.route('/service04')
-def service04():
-    if 'email' not in session or session.get('role') != 'trader':
-        flash("Access denied. Traders only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))
-
-    stocks = get_all_stocks()
-    return render_template('service-details-4.html', user=user, stocks=stocks)
-
-@app.route('/service04/buy_stock/<string:stock_id>', methods=['GET', 'POST'])
-def buy_stock(stock_id):
-    if 'email' not in session or session.get('role') != 'trader':
-        flash("Access denied. Traders only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))   
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))
-    stock = get_stock_by_id(stock_id)
-
-    if not stock:
-        flash("Stock not found.", "danger")
-        return redirect(url_for('service04'))
-
-    if request.method == 'POST':
-        quantity = int(request.form.get('quantity', 0))
-
-        if quantity <= 0:
-            flash("Please enter a valid quantity.", "danger")
-            return redirect(url_for('buy_stock', stock_id=stock_id))
-
-        # Create transaction record
-        transaction = create_transaction(
-            user_id=user['id'],
-            stock_id=stock_id,
-            action='buy',
-            quantity=quantity,
-            price=float(stock['price']),
-            status='completed'
-        )
-
-        # Update or create portfolio entry
-        portfolio_entry = get_portfolio_item(user['id'], stock_id)
-
-        if portfolio_entry:
-            # Update existing portfolio entry
-            quantity_decimal = Decimal(str(quantity))
-            portfolio_quantity = Decimal(str(portfolio_entry['quantity']))
-            portfolio_avg_price = Decimal(str(portfolio_entry['average_price']))
-            stock_price = Decimal(str(stock['price']))
-
-            total_value = (portfolio_quantity * portfolio_avg_price) + (quantity_decimal * stock_price)
-            total_quantity = portfolio_quantity + quantity_decimal
-            avg_price = total_value / total_quantity
-
-            update_portfolio(
-                user_id=user['id'],
-                stock_id=stock_id,
-                quantity=Decimal(str(quantity)),
-                average_price=avg_price
-            )
-        else:
-            # Create new portfolio entry
-            update_portfolio(
-                user_id=user['id'],
-                stock_id=stock_id,
-                quantity=Decimal(str(quantity)),
-                average_price=Decimal(str(stock['price']))
-            )
-
-        # Send transaction notification
-        send_notification(
-            TRANSACTION_TOPIC_ARN,
-            f"Stock Purchase: {stock['symbol']}",
-            f"User {user['username']} purchased {quantity} shares of {stock['symbol']} at ₹{stock['price']} per share.",
-            {
-                'event_type': {
-                    'DataType': 'String',
-                    'StringValue': 'BUY'
-                },
-                'stock_symbol': {
-                    'DataType': 'String',
-                    'StringValue': stock['symbol']
-                },
-                'quantity': {
-                    'DataType': 'Number',
-                    'StringValue': str(quantity)
-                }
-            }
-        )
-
-        flash(f"Successfully purchased {quantity} shares of {stock['symbol']}!", "success")
-        return redirect(url_for('service05'))
-
-    return render_template('buy_stock.html', user=user, stock=stock)
-
-@app.route('/service04/sell_stock/<string:stock_id>', methods=['GET', 'POST'])
-def sell_stock(stock_id):
-    if 'email' not in session or session.get('role') != 'trader':
-        flash("Access denied. Traders only.", "danger")
-        return redirect(url_for('login'))
-    user = get_user_by_email(session.get('email'))
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))
-    stock = get_stock_by_id(stock_id)
-
-    if not stock:
-        flash("Stock not found.", "danger")
-        return redirect(url_for('service04'))
-
-    # Check if user owns this stock
-    portfolio_entry = get_portfolio_item(user['id'], stock_id)
-
-    if not portfolio_entry:
-        flash("You don't own any shares of this stock.", "danger")
-        return redirect(url_for('service04'))
-
-    if request.method == 'POST':
-        quantity = int(request.form.get('quantity', 0))
-
-        if quantity <= 0:
-            flash("Please enter a valid quantity.", "danger")
-            return redirect(url_for('sell_stock', stock_id=stock_id))
-
-        if quantity > portfolio_entry['quantity']:
-            flash("You don't have enough shares to sell.", "danger")
-            return redirect(url_for('sell_stock', stock_id=stock_id))
-
-        # Create transaction record
-        transaction = create_transaction(
-            user_id=user['id'],
-            stock_id=stock_id,
-            action='sell',
-            quantity=quantity,
-            price=float(stock['price']),
-            status='completed'
-        )
-
-        # Update portfolio entry
-        remaining_quantity = portfolio_entry['quantity'] - quantity
-
-        update_portfolio(
-            user_id=user['id'],
-            stock_id=stock_id,
-            quantity=remaining_quantity,
-            average_price=float(portfolio_entry['average_price']) if remaining_quantity > 0 else 0
-        )
-
-        # Send transaction notification
-        send_notification(
-            TRANSACTION_TOPIC_ARN,
-            f"Stock Purchase: {stock['symbol']}",
-            f"User {user['username']} purchased {quantity} shares of {stock['symbol']} at ₹{stock['price']} per share.",
-            {
-                'event_type': {
-                    'DataType': 'String',
-                    'StringValue': 'BUY'
-                },
-                'stock_symbol': {
-                    'DataType': 'String',
-                    'StringValue': stock['symbol']
-                },
-                'quantity': {
-                    'DataType': 'Number',
-                    'StringValue': str(quantity)
-                }
-            }
-        )
-
-        flash(f"Successfully sold {quantity} shares of {stock['symbol']}!", "success")
-        return redirect(url_for('service05'))
-
-    return render_template('sell_stock.html', user=user, stock=stock, portfolio_entry=portfolio_entry)
-
-# Portfolio view for traders
-@app.route('/service05')
-def service05():
-    if 'email' not in session or session.get('role') != 'trader':
-        flash("Access denied. Traders only.", "danger")
-        return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))   
-    if not user:
-       session.clear()
-       flash("Your account no longer exists.", "danger")
-       return redirect(url_for('login'))
-
-    user = get_user_by_email(session.get('email'))
-
-    # Get portfolio with stock details
-    portfolio = get_user_portfolio(user['id'])
-
-    # Calculate total portfolio value
-    total_value = 0
-    try:
-        for item in portfolio:
-            if 'stock' in item and 'price' in item['stock'] and 'quantity' in item:
-                total_value += float(item['quantity']) * float(item['stock']['price'])
-    except Exception as e:
-        print(f"Error calculating portfolio value: {str(e)}")
-        flash("There was an issue calculating your portfolio value.", "warning")
-
-    # Get transaction history
-    transactions = get_user_transactions(user['id'])
-    # Convert transaction dates to datetime objects
-    for transaction in transactions:
-        if 'transaction_date' in transaction and transaction['transaction_date']:
-            try:
-                # Convert ISO string to datetime object if it's not already
-                if isinstance(transaction['transaction_date'], str):
-                    transaction['transaction_date'] = datetime.fromisoformat(transaction['transaction_date'])
-            except (ValueError, TypeError) as e:
-                print(f"Error converting date: {str(e)}")
-                # If conversion fails, set to None
-                transaction['transaction_date'] = None
-
-    return render_template('service-details-5.html', user=user, portfolio=portfolio, total_value=total_value, transactions=transactions)
-
-@app.route('/debug/check_stocks')
-def check_stocks():
-    # This route will check if stocks are accessible in the database
-    try:
-        stocks = get_all_stocks()
-        result = {
-            "success": True,
-            "stocks_count": len(stocks),
-            "first_five": [{"id": s['id'], "symbol": s['symbol'], "name": s['name'], "price": float(s['price'])} for s in stocks[:5]]
-        }
-    except Exception as e:
-        result = {
-            "success": False,
-            "error": str(e)
-        }
-
-    # Return as plain text for easy debugging
-    return "<pre>" + str(result) + "</pre>"
+    return render_template('login.html', title="Welcome Back")
 
 @app.route('/logout')
 def logout():
-    session.clear()
+    """User Logout Route"""
+    session.pop('user_id', None)
     flash('You have been logged out.', 'info')
     return redirect(url_for('index'))
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port = 5000)
+# --- Admin Routes (Role: Admin) ---
 
+@app.route('/admin_dashboard')
+@login_required('Admin')
+def admin_dashboard():
+    """Admin Dashboard Overview"""
+    total_traders = sum(1 for user in USERS.values() if user['role'] == 'Trader')
+    total_transactions = len(TRANSACTIONS)
+    
+    # Calculate total market capitalization in the system
+    total_market_value = sum(calculate_portfolio_value(uid) 
+                             for uid, user in USERS.items() if user['role'] == 'Trader')
+
+    context = {
+        'total_traders': total_traders,
+        'total_transactions': total_transactions,
+        'total_market_value': f"${total_market_value:,.2f}"
+    }
+    return render_template('admin_dashboard.html', title="Admin Dashboard", **context)
+
+@app.route('/view_traders')
+@login_required('Admin')
+def view_traders():
+    """Admin: View all registered traders."""
+    traders_list = []
+    for user_id, user in USERS.items():
+        if user['role'] == 'Trader':
+            portfolio_value = calculate_portfolio_value(user_id)
+            traders_list.append({
+                'id': user_id[:8], # Truncated for display
+                'username': user['username'],
+                'email': user['email'],
+                'portfolio_value': f"${portfolio_value:,.2f}"
+            })
+    
+    return render_template('view_traders.html', 
+                           title="View Traders", 
+                           traders=traders_list, 
+                           total_traders=len(traders_list))
+
+@app.route('/view_transactions')
+@login_required('Admin')
+def view_transactions():
+    """Admin: View all transaction records."""
+    buy_count = sum(1 for t in TRANSACTIONS if t['action'] == 'BUY')
+    sell_count = sum(1 for t in TRANSACTIONS if t['action'] == 'SELL')
+    
+    return render_template('view_transactions.html', 
+                           title="Transaction Records", 
+                           transactions=TRANSACTIONS,
+                           total_transactions=len(TRANSACTIONS),
+                           buy_count=buy_count,
+                           sell_count=sell_count)
+
+@app.route('/view_portfolios')
+@login_required('Admin')
+def view_portfolios():
+    """Admin: View and manage all trader portfolios."""
+    all_holdings = []
+    total_portfolio_value = 0.0
+    traders_with_portfolio = set()
+
+    for user_id, holdings in PORTFOLIOS.items():
+        user = USERS.get(user_id)
+        if not user: continue
+        
+        traders_with_portfolio.add(user_id)
+        
+        for symbol, holding in holdings.items():
+            stock = STOCKS.get(symbol, {'name': 'N/A', 'industry': 'N/A', 'price': 0.0})
+            current_price = stock['price']
+            market_value = holding['quantity'] * current_price
+            total_portfolio_value += market_value
+            
+            all_holdings.append({
+                'trader': user['username'],
+                'stock_name': stock['name'],
+                'symbol': symbol,
+                'sector': stock['industry'],
+                'quantity': holding['quantity'],
+                'avg_buy_price': f"${holding['avg_buy_price']:,.2f}",
+                'current_price': f"${current_price:,.2f}",
+                'market_value': f"${market_value:,.2f}"
+            })
+            
+    context = {
+        'all_holdings': all_holdings,
+        'total_value': f"${total_portfolio_value:,.2f}",
+        'total_traders': len(traders_with_portfolio),
+        'total_stocks_held': len(all_holdings) # Count of unique stock holdings across all traders
+    }
+
+    return render_template('view_portfolios.html', title="Portfolio Management", **context)
+
+
+# --- Trader Routes (Role: Trader) ---
+
+@app.route('/trader_dashboard')
+@login_required('Trader')
+def trader_dashboard():
+    """Trader Dashboard: Overview and Portfolio Summary"""
+    user = g.user # Use the globally loaded user
+    user_id = user['id']
+    
+    portfolio_value = calculate_portfolio_value(user_id)
+    
+    # Get Market Overview (A sample of stocks for the dashboard)
+    market_overview = [s for s in STOCKS.values()]
+
+    context = {
+        'username': user['username'],
+        'cash_balance': f"${user['cash_balance']:,.2f}",
+        'portfolio_value': f"${portfolio_value:,.2f}",
+        'total_equity': f"${user['cash_balance'] + portfolio_value:,.2f}",
+        'market_overview': market_overview
+    }
+    return render_template('trader_dashboard.html', title="Trader Dashboard", **context)
+
+@app.route('/available_stocks')
+@login_required('Trader')
+def available_stocks():
+    """Trader: View all available stocks for buying/selling."""
+    # Note: Real implementation would connect to a market data API
+    stocks_list = list(STOCKS.values())
+    return render_template('available_stocks.html', title="Available Stocks", stocks=stocks_list)
+
+@app.route('/my_portfolio')
+@login_required('Trader')
+def my_portfolio():
+    """Trader: View detailed portfolio and transaction history."""
+    user = g.user # Use the globally loaded user
+    user_id = user['id']
+    
+    holdings_list = []
+    portfolio_value = 0.0
+    
+    if user_id in PORTFOLIOS:
+        for symbol, holding in PORTFOLIOS[user_id].items():
+            stock = STOCKS.get(symbol, {'name': 'N/A', 'price': 0.0, 'industry': 'N/A'})
+            current_price = stock['price']
+            market_value = holding['quantity'] * current_price
+            portfolio_value += market_value
+            
+            # Calculate average buy price correctly, handling case where it might be missing
+            avg_buy_price = holding.get('avg_buy_price', 0.0)
+            
+            holdings_list.append({
+                'symbol': symbol,
+                'name': stock['name'],
+                'quantity': holding['quantity'],
+                'avg_buy_price': f"${avg_buy_price:,.2f}",
+                'current_price': f"${current_price:,.2f}",
+                'market_value': f"${market_value:,.2f}",
+                'pnl': f"${(market_value - (holding['quantity'] * avg_buy_price)):,.2f}" # Simple P&L
+            })
+
+    # Only show relevant transactions for the current user
+    user_transactions = [t for t in TRANSACTIONS if t['user_id'] == user_id]
+    
+    context = {
+        'holdings': holdings_list,
+        'transactions': user_transactions,
+        'cash_balance': f"${user['cash_balance']:,.2f}",
+        'portfolio_value': f"${portfolio_value:,.2f}"
+    }
+    return render_template('my_portfolio.html', title="My Portfolio", **context)
+
+
+@app.route('/buy_stock/<symbol>', methods=['POST'])
+@login_required('Trader')
+def buy_stock(symbol):
+    """Handles the stock purchase logic."""
+    user = g.user # Use the globally loaded user
+    user_id = user['id']
+    
+    try:
+        quantity = int(request.form['quantity'])
+        if quantity <= 0:
+            flash("Quantity must be positive.", 'error')
+            return redirect(url_for('available_stocks'))
+    except (ValueError, TypeError):
+        flash("Invalid quantity entered.", 'error')
+        return redirect(url_for('available_stocks'))
+        
+    stock = STOCKS.get(symbol)
+    if not stock:
+        flash(f"Stock {symbol} not found.", 'error')
+        return redirect(url_for('available_stocks'))
+        
+    price = stock['price']
+    cost = quantity * price
+    
+    if user['cash_balance'] < cost:
+        flash(f"Insufficient funds. Need ${cost:,.2f}, have ${user['cash_balance']:,.2f}.", 'error')
+        return redirect(url_for('available_stocks'))
+        
+    # Process Transaction
+    user['cash_balance'] -= cost
+    
+    # Update Portfolio
+    PORTFOLIOS.setdefault(user_id, {})
+    holdings = PORTFOLIOS[user_id].setdefault(symbol, {'quantity': 0, 'avg_buy_price': 0.0})
+    
+    # Calculate new average buy price
+    old_total_cost = holdings['quantity'] * holdings['avg_buy_price']
+    new_total_cost = old_total_cost + cost
+    new_total_quantity = holdings['quantity'] + quantity
+    
+    holdings['avg_buy_price'] = new_total_cost / new_total_quantity
+    holdings['quantity'] = new_total_quantity
+    
+    # Record Transaction
+    TRANSACTIONS.append({
+        'id': str(uuid.uuid4())[:8],
+        'user_id': user_id,
+        'username': user['username'],
+        'action': 'BUY',
+        'stock': symbol,
+        'quantity': quantity,
+        'price': price,
+        'total': cost,
+        'status': 'Completed',
+        'date': time.strftime("%Y-%m-%d %H:%M:%S")
+    })
+    
+    flash(f"Successfully bought {quantity} shares of {symbol} for ${cost:,.2f}.", 'success')
+    return redirect(url_for('my_portfolio'))
+
+@app.route('/sell_stock/<symbol>', methods=['POST'])
+@login_required('Trader')
+def sell_stock(symbol):
+    """Handles the stock selling logic."""
+    user = g.user # Use the globally loaded user
+    user_id = user['id']
+    
+    try:
+        quantity = int(request.form['quantity'])
+        if quantity <= 0:
+            flash("Quantity must be positive.", 'error')
+            return redirect(url_for('my_portfolio'))
+    except (ValueError, TypeError):
+        flash("Invalid quantity entered.", 'error')
+        return redirect(url_for('my_portfolio'))
+        
+    stock = STOCKS.get(symbol)
+    if not stock:
+        flash(f"Stock {symbol} not found.", 'error')
+        return redirect(url_for('my_portfolio'))
+        
+    if user_id not in PORTFOLIOS or symbol not in PORTFOLIOS[user_id]:
+        flash(f"You do not own any shares of {symbol}.", 'error')
+        return redirect(url_for('my_portfolio'))
+        
+    holdings = PORTFOLIOS[user_id][symbol]
+    
+    if holdings['quantity'] < quantity:
+        flash(f"You only own {holdings['quantity']} shares of {symbol}.", 'error')
+        return redirect(url_for('my_portfolio'))
+        
+    # Process Transaction
+    price = stock['price']
+    revenue = quantity * price
+    user['cash_balance'] += revenue
+    
+    # Update Portfolio
+    holdings['quantity'] -= quantity
+    
+    if holdings['quantity'] == 0:
+        del PORTFOLIOS[user_id][symbol]
+        if not PORTFOLIOS[user_id]:
+            del PORTFOLIOS[user_id]
+            
+    # Record Transaction
+    TRANSACTIONS.append({
+        'id': str(uuid.uuid4())[:8],
+        'user_id': user_id,
+        'username': user['username'],
+        'action': 'SELL',
+        'stock': symbol,
+        'quantity': quantity,
+        'price': price,
+        'total': revenue,
+        'status': 'Completed',
+        'date': time.strftime("%Y-%m-%d %H:%M:%S")
+    })
+    
+    flash(f"Successfully sold {quantity} shares of {symbol} for ${revenue:,.2f}.", 'success')
+    return redirect(url_for('my_portfolio'))
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
