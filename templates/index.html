@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="relative min-h-[70vh] flex flex-col justify-center items-center text-center p-6 rounded-xl overflow-hidden">
+    <!-- Background Gradient (matching screenshot 1) -->
+    <div class="absolute inset-0 bg-gradient-to-br from-blue-600 to-purple-800 opacity-90"></div>
+    
+    <div class="relative z-10 text-white">
+        <h1 class="text-6xl sm:text-7xl font-extrabold mb-4 tracking-tight">
+            Welcome to STOCKER
+        </h1>
+        <p class="text-xl sm:text-2xl font-light mb-12">
+            Cloud-native trading, fast and secure
+        </p>
+        
+        <div class="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-6">
+            <a href="{{ url_for('register') }}" class="bg-white text-purple-700 font-bold py-3 px-8 rounded-lg shadow-xl hover:bg-gray-100 transition duration-300 transform hover:scale-105">
+                GET STARTED
+            </a>
+            <a href="{{ url_for('login') }}" class="border-2 border-white text-white font-bold py-3 px-8 rounded-lg shadow-xl hover:bg-white hover:text-purple-700 transition duration-300 transform hover:scale-105">
+                LOGIN
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="mt-12 grid md:grid-cols-3 gap-8 text-center">
+    <div class="p-6 bg-white rounded-xl shadow-lg">
+        <h2 class="text-xl font-bold text-gradient mb-2">Real-time Data</h2>
+        <p class="text-gray-600">Access market data and execute trades instantly.</p>
+    </div>
+    <div class="p-6 bg-white rounded-xl shadow-lg">
+        <h2 class="text-xl font-bold text-gradient mb-2">Secure Platform</h2>
+        <p class="text-gray-600">Your portfolio and transactions are protected.</p>
+    </div>
+    <div class="p-6 bg-white rounded-xl shadow-lg">
+        <h2 class="text-xl font-bold text-gradient mb-2">Role-Based Access</h2>
+        <p class="text-gray-600">Separate dashboards for Admin and Traders.</p>
+    </div>
+</div>
+{% endblock %}

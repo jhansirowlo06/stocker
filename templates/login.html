@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-[80vh]">
+    <div class="w-full max-w-md bg-white p-8 sm:p-10 rounded-2xl shadow-xl border border-gray-100 text-center">
+        <div class="inline-block bg-purple-100 text-purple-700 text-xs font-bold px-2 py-1 rounded mb-4">
+            STOCKER
+        </div>
+        <h2 class="text-3xl font-bold text-gray-800 mb-2">Welcome Back</h2>
+        <p class="text-gray-500 mb-8 text-md">Login to access your trading account</p>
+
+        <form method="POST" action="{{ url_for('login') }}">
+            <div class="space-y-5">
+                <!-- Role Selection -->
+                <div class="text-left">
+                    <label for="role" class="block text-sm font-medium text-gray-700 mb-1">Select Role</label>
+                    <select id="role" name="role" required class="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 shadow-sm">
+                        <option value="Trader">Trader</option>
+                        <option value="Admin">Admin</option>
+                    </select>
+                </div>
+
+                <!-- Email Address -->
+                <div class="text-left">
+                    <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+                    <input type="email" id="email" name="email" required placeholder="trader@email.com"
+                           class="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 shadow-sm">
+                </div>
+
+                <!-- Password -->
+                <div class="text-left">
+                    <label for="password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                    <input type="password" id="password" name="password" required placeholder="••••••••"
+                           class="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150 shadow-sm">
+                </div>
+            </div>
+
+            <!-- Login Button - Fixed Styling -->
+            <button type="submit" 
+                class="w-full mt-8 
+                       bg-gradient-to-r from-indigo-600 to-purple-600 
+                       text-white font-semibold py-3 rounded-xl 
+                       shadow-lg hover:from-indigo-700 hover:to-purple-700 
+                       transition duration-300 transform hover:scale-[1.01] 
+                       focus:outline-none focus:ring-4 focus:ring-indigo-500 focus:ring-opacity-50">
+                LOGIN
+            </button>
+        </form>
+
+        <p class="mt-8 text-sm text-gray-500">
+            Don't have an account? 
+            <a href="{{ url_for('register') }}" class="text-indigo-600 font-medium hover:text-indigo-800 transition duration-150">Register here</a>
+        </p>
+    </div>
+</div>
+{% endblock %}
