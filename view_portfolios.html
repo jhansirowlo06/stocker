@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <h1 class="text-4xl font-bold text-gray-800 mb-6">Trader Portfolio Management</h1>
+    <p class="text-lg text-gray-600 mb-8">View and manage all trader portfolios across the platform</p>
+
+    <div class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="bg-white p-5 rounded-xl shadow-lg">
+                <h2 class="text-lg font-semibold text-gray-800">Total Portfolio Value</h2>
+                <p class="text-3xl font-bold text-green-600 mt-1">{{ total_value }}</p>
+            </div>
+            <div class="bg-white p-5 rounded-xl shadow-lg">
+                <h2 class="text-lg font-semibold text-gray-800">Total Traders with Portfolios</h2>
+                <p class="text-3xl font-bold text-purple-600 mt-1">{{ total_traders }}</p>
+            </div>
+            <div class="bg-white p-5 rounded-xl shadow-lg">
+                <h2 class="text-lg font-semibold text-gray-800">Total Stocks Held</h2>
+                <p class="text-3xl font-bold text-blue-600 mt-1">{{ total_stocks_held }}</p>
+            </div>
+        </div>
+    
+        <div class="bg-white p-6 rounded-xl shadow-lg overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead>
+                    <tr>
+                        <th class="px-6 py-3 bg-purple-600 text-left text-xs font-semibold text-white uppercase tracking-wider rounded-tl-lg">TRADER</th>
+                        <th class="px-6 py-3 bg-purple-600 text-left text-xs font-semibold text-white uppercase tracking-wider">STOCK</th>
+                        <th class="px-6 py-3 bg-purple-600 text-left text-xs font-semibold text-white uppercase tracking-wider">SYMBOL</th>
+                        <th class="px-6 py-3 bg-purple-600 text-left text-xs font-semibold text-white uppercase tracking-wider">SECTOR</th>
+                        <th class="px-6 py-3 bg-purple-600 text-right text-xs font-semibold text-white uppercase tracking-wider">QUANTITY</th>
+                        <th class="px-6 py-3 bg-purple-600 text-right text-xs font-semibold text-white uppercase tracking-wider">AVG. BUY PRICE</th>
+                        <th class="px-6 py-3 bg-purple-600 text-right text-xs font-semibold text-white uppercase tracking-wider">CURRENT PRICE</th>
+                        <th class="px-6 py-3 bg-purple-600 text-right text-xs font-semibold text-white uppercase tracking-wider rounded-tr-lg">MARKET VALUE</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    {% for holding in all_holdings %}
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ holding.trader }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ holding.stock_name }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-purple-600">{{ holding.symbol }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ holding.sector }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-600">{{ holding.quantity }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-blue-600">{{ holding.avg_buy_price }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-600">{{ holding.current_price }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-bold text-green-600 text-right">{{ holding.market_value }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="8" class="px-6 py-4 text-center text-sm text-gray-500">No portfolios currently active.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

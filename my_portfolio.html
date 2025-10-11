@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto py-12 px-4 sm:px-6 lg:px-8">
+    <h1 class="text-3xl font-bold text-gray-800 mb-2">My Portfolio ({{ username }})</h1>
+    <p class="text-lg text-gray-600 mb-8">Your current stock holdings and sales history.</p>
+
+    <!-- Holdings Table -->
+    <div class="bg-white p-6 rounded-xl shadow-lg mb-10">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Current Holdings</h2>
+        
+        {% if holdings %}
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead>
+                        <tr>
+                            <th class="px-6 py-3 bg-purple-600 text-left text-xs font-semibold text-white uppercase tracking-wider rounded-tl-lg">SYMBOL</th>
+                            <th class="px-6 py-3 bg-purple-600 text-left text-xs font-semibold text-white uppercase tracking-wider">QUANTITY</th>
+                            <th class="px-6 py-3 bg-purple-600 text-right text-xs font-semibold text-white uppercase tracking-wider">AVG. BUY PRICE</th>
+                            <th class="px-6 py-3 bg-purple-600 text-right text-xs font-semibold text-white uppercase tracking-wider">CURRENT VALUE</th>
+                            <th class="px-6 py-3 bg-purple-600 text-center text-xs font-semibold text-white uppercase tracking-wider rounded-tr-lg">ACTIONS</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        {% for symbol, holding in holdings.items() %}
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-purple-600">{{ symbol }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ holding.quantity }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-600">${{ "%.2f"|format(holding.avg_price) }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-right font-bold text-green-600">${{ "%.2f"|format(holding.market_value) }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-center text-sm">
+                                <!-- Sell Form for each stock -->
+                                <form method="POST" action="{{ url_for('sell_stock', symbol=symbol) }}" class="inline-flex items-center space-x-2">
+                                    <input type="number" name="quantity" required min="1" max="{{ holding.quantity }}" placeholder="Qty"
+                                           class="w-16 p-1 border border-gray-300 rounded-lg text-center text-sm focus:ring-purple-500 focus:border-purple-500">
+                                    <button type="submit" 
+                                            class="bg-red-500 hover:bg-red-600 text-white font-medium py-1 px-3 rounded-lg shadow-md transition duration-150 text-xs">
+                                        SELL
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <div class="p-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 rounded-lg">
+                You currently have no stock holdings. Go to <a href="{{ url_for('available_stocks') }}" class="font-semibold underline">Buy and Trade Stocks</a> to start trading!
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Transaction History (Simplified view) -->
+    <div class="bg-white p-6 rounded-xl shadow-lg">
+        <h2 class="text-2xl font-semibold text-gray-800 mb-4">Recent Transactions</h2>
+        
+        {% if transactions %}
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead>
+                        <tr>
+                            <th class="px-6 py-3 bg-gray-200 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider rounded-tl-lg">DATE</th>
+                            <th class="px-6 py-3 bg-gray-200 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">ACTION</th>
+                            <th class="px-6 py-3 bg-gray-200 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">SYMBOL</th>
+                            <th class="px-6 py-3 bg-gray-200 text-right text-xs font-semibold text-gray-700 uppercase tracking-wider">QUANTITY</th>
+                            <th class="px-6 py-3 bg-gray-200 text-right text-xs font-semibold text-gray-700 uppercase tracking-wider rounded-tr-lg">TOTAL VALUE</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        {% for tx in transactions %}
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ tx.timestamp }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-semibold {% if tx.action == 'BUY' %}text-green-600{% else %}text-red-600{% endif %}">{{ tx.action }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{{ tx.symbol }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-700">{{ tx.quantity }}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-right font-medium text-gray-800">${{ "%.2f"|format(tx.total) }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="text-gray-500">No transactions recorded yet.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
